@@ -10,11 +10,11 @@ from telebot import types
 
 
 # ==========================================
-# CONFIGURATION (آپ کا نیا ٹوکن اور آئی ڈی درج ہے)
+# CONFIGURATION
 # ==========================================
 
-BOT_TOKEN = '9082925617:AAHqHW1njLyOJBmRngmWagi9cGbve83d1LM'  # آپ کا تازہ ترین ٹوکن[span_4](start_span)[span_4](end_span)
-ADMIN_ID = 7499911678                                     # آپ کی اصلی ایڈمن آئی ڈی[span_5](start_span)[span_5](end_span)
+BOT_TOKEN = '9082925617:AAHqHW1njLyOJBmRngmWagi9cGbve83d1LM'  # آپ کا تازہ ترین ٹوکن[span_0](start_span)[span_0](end_span)
+ADMIN_ID = 7499911678                                     # آپ کی اصلی ایڈمن آئی ڈی[span_1](start_span)[span_1](end_span)
 DB_NAME = "business_bot.db"
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
@@ -782,4 +782,5 @@ if __name__ == "__main__":
     try:
         bot.infinity_polling(
             timeout=30,
-            long_p
+            long_polling_timeout=30,
+            skip
