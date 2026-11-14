@@ -16,7 +16,7 @@ from telebot import types
 
 # Local/Pydroid: paste your NEW BotFather token between quotes.
 # Railway: set the BOT_TOKEN environment variable instead.
-BOT_TOKEN = os.getenv("BOT_TOKEN", "PASTE_YOUR_NEW_BOT_TOKEN_HERE")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "9082925617:AAGdDLmBdFbWgNM0sOdjJXFViQPyJFZyJE0")
 
 ADMIN_ID = 7499911678
 BOT_NAME = "Premium Business Assistant"
