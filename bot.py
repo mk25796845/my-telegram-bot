@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 import telebot
 from telebot import types
+from factory_core import register_factory_handlers
 
 
 # ============================================================
