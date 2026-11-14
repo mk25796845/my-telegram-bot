@@ -1,41 +1,69 @@
 import os
+import time
+import html
 import sqlite3
 import logging
 import threading
-import html
-from datetime import datetime
+from datetime import datetime, timezone
 
 import telebot
 from telebot import types
 
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# ============================================================
+# 1. CONFIGURATION
+# ============================================================
 
-BOT_TOKEN = '9082925617:AAHqHW1njLyOJBmRngmWagi9cGbve83d1LM'  # آپ کا تازہ ترین ٹوکن[span_0](start_span)[span_0](end_span)
-ADMIN_ID = 7499911678                                     # آپ کی اصلی ایڈمن آئی ڈی[span_1](start_span)[span_1](end_span)
-DB_NAME = "business_bot.db"
+# Local/Pydroid: paste your NEW BotFather token between quotes.
+# Railway: set the BOT_TOKEN environment variable instead.
+BOT_TOKEN = os.getenv("BOT_TOKEN", "9082925617:AAFy7uRMyx8Ef-j-e0tVFN3ACuTX6QbUpaw")
 
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
+ADMIN_ID = 7499911678
+BOT_NAME = "Premium Business Assistant"
+DB_NAME = os.getenv("DB_PATH", "business_bot.db")
+SUPPORT_USERNAME = ""  # Example: "your_support_username"
+
+SERVICES = [
+    ("🌐 Website Development", "Professional website development."),
+    ("🤖 AI Automation", "AI-powered business automation."),
+    ("🎨 Graphic Design", "Premium graphic design services."),
+    ("📱 Social Media Management", "Social media management services."),
+    ("💻 Custom Software", "Custom software solutions."),
+]
+
+MAX_ORDER_DETAILS = 2500
+BROADCAST_DELAY_SECONDS = 0.05
+
+
+# ============================================================
+# 2. LOGGING AND BOT INITIALIZATION
+# ============================================================
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
+    format="%(asctime)s | %(levelname)s | %(message)s"
 )
+logger = logging.getLogger("BusinessBot")
 
-logger = logging.getLogger(__name__)
+if (
+    not BOT_TOKEN
+    or BOT_TOKEN == "PASTE_YOUR_NEW_BOT_TOKEN_HERE"
+    or ":" not in BOT_TOKEN
+):
+    raise ValueError(
+        "Set your NEW Telegram BotFather token in BOT_TOKEN "
+        "or configure the BOT_TOKEN environment variable."
+    )
+
+bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
+
+
+# ============================================================
+# 3. DATABASE
+# ============================================================
 
 db_lock = threading.RLock()
-state_lock = threading.RLock()
 
-# Temporary conversation states
-user_states = {}
-
-
-# ==========================================
-# DATABASE
-# ==========================================
 
 def get_db():
     conn = sqlite3.connect(
@@ -44,743 +72,632 @@ def get_db():
         check_same_thread=False
     )
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 30000")
     return conn
 
 
 def init_database():
     with db_lock:
         conn = get_db()
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
 
-        conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id INTEGER PRIMARY KEY,
+                    username TEXT NOT NULL DEFAULT '',
+                    first_name TEXT NOT NULL DEFAULT '',
+                    joined_at TEXT NOT NULL,
+                    last_seen TEXT NOT NULL
+                )
+            """)
 
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                created_at TEXT
-            )
-        """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS orders (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    service TEXT NOT NULL,
+                    customer_name TEXT NOT NULL,
+                    details TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'Pending',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (user_id)
+                        REFERENCES users(user_id)
+                )
+            """)
 
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS orders (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                service TEXT NOT NULL,
-                details TEXT,
-                status TEXT DEFAULT 'Pending',
-                created_at TEXT
-            )
-        """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+            """)
 
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            )
-        """)
+            conn.execute("""
+                INSERT OR IGNORE INTO settings (key, value)
+                VALUES ('maintenance', '0')
+            """)
 
-        conn.execute("""
-            INSERT OR IGNORE INTO settings (key, value)
-            VALUES ('maintenance', '0')
-        """)
-
-        conn.commit()
-        conn.close()
-
-    logger.info("Database initialized successfully.")
+            conn.commit()
+            logger.info("Database initialized.")
+        finally:
+            conn.close()
 
 
-def register_user(user):
+def now_text():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def save_user(user):
+    timestamp = now_text()
     with db_lock:
         conn = get_db()
+        try:
+            conn.execute("""
+                INSERT INTO users (
+                    user_id, username, first_name, joined_at, last_seen
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    username = excluded.username,
+                    first_name = excluded.first_name,
+                    last_seen = excluded.last_seen
+            """, (
+                user.id,
+                user.username or "",
+                user.first_name or "",
+                timestamp,
+                timestamp
+            ))
+            conn.commit()
+        finally:
+            conn.close()
 
-        conn.execute("""
-            INSERT INTO users (
-                user_id, username, first_name, created_at
-            )
-            VALUES (?, ?, ?, ?)
 
-            ON CONFLICT(user_id) DO UPDATE SET
-                username = excluded.username,
-                first_name = excluded.first_name
-        """, (
-            user.id,
-            user.username or "",
-            user.first_name or "",
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        ))
-
-        conn.commit()
-        conn.close()
-
-
-def save_order(user_id, service, details):
+def save_order(user_id, service, customer_name, details):
     with db_lock:
         conn = get_db()
-
-        cursor = conn.execute("""
-            INSERT INTO orders (
-                user_id, service, details,
-                status, created_at
-            )
-            VALUES (?, ?, ?, ?, ?)
-        """, (
-            user_id,
-            service,
-            details,
-            "Pending",
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        ))
-
-        order_id = cursor.lastrowid
-
-        conn.commit()
-        conn.close()
-
-    return order_id
+        try:
+            cursor = conn.execute("""
+                INSERT INTO orders (
+                    user_id, service, customer_name,
+                    details, status, created_at
+                )
+                VALUES (?, ?, ?, ?, 'Pending', ?)
+            """, (
+                user_id,
+                service,
+                customer_name,
+                details,
+                now_text()
+            ))
+            order_id = cursor.lastrowid
+            conn.commit()
+            return order_id
+        finally:
+            conn.close()
 
 
-def get_maintenance():
+def get_setting(key, default="0"):
     with db_lock:
         conn = get_db()
+        try:
+            row = conn.execute(
+                "SELECT value FROM settings WHERE key = ?",
+                (key,)
+            ).fetchone()
+            return row["value"] if row else default
+        finally:
+            conn.close()
 
-        row = conn.execute("""
-            SELECT value FROM settings
-            WHERE key = 'maintenance'
-        """).fetchone()
 
-        conn.close()
-
-    return row["value"] == "1" if row else False
-
-
-def set_maintenance(enabled):
+def set_setting(key, value):
     with db_lock:
         conn = get_db()
+        try:
+            conn.execute("""
+                INSERT INTO settings (key, value)
+                VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """, (key, str(value)))
+            conn.commit()
+        finally:
+            conn.close()
 
-        conn.execute("""
-            UPDATE settings
-            SET value = ?
-            WHERE key = 'maintenance'
-        """, ("1" if enabled else "0",))
 
-        conn.commit()
-        conn.close()
+def get_statistics():
+    with db_lock:
+        conn = get_db()
+        try:
+            users = conn.execute(
+                "SELECT COUNT(*) AS n FROM users"
+            ).fetchone()["n"]
+
+            orders = conn.execute(
+                "SELECT COUNT(*) AS n FROM orders"
+            ).fetchone()["n"]
+
+            pending = conn.execute("""
+                SELECT COUNT(*) AS n FROM orders
+                WHERE status = 'Pending'
+            """).fetchone()["n"]
+
+            return users, orders, pending
+        finally:
+            conn.close()
 
 
-# ==========================================
-# KEYBOARDS
-# ==========================================
+def get_recent_orders(limit=10):
+    with db_lock:
+        conn = get_db()
+        try:
+            return conn.execute("""
+                SELECT id, user_id, service, customer_name,
+                       details, status, created_at
+                FROM orders
+                ORDER BY id DESC
+                LIMIT ?
+            """, (limit,)).fetchall()
+        finally:
+            conn.close()
+
+
+def get_all_user_ids():
+    with db_lock:
+        conn = get_db()
+        try:
+            rows = conn.execute(
+                "SELECT user_id FROM users ORDER BY user_id"
+            ).fetchall()
+            return [row["user_id"] for row in rows]
+        finally:
+            conn.close()
+
+
+# ============================================================
+# 4. IN-MEMORY USER SESSIONS
+# ============================================================
+
+user_states = {}
+user_data = {}
+session_lock = threading.RLock()
+
+
+def set_state(user_id, state):
+    with session_lock:
+        user_states[user_id] = state
+
+
+def get_state(user_id):
+    with session_lock:
+        return user_states.get(user_id)
+
+
+def set_data(user_id, key, value):
+    with session_lock:
+        user_data.setdefault(user_id, {})
+        user_data[user_id][key] = value
+
+
+def get_data(user_id, key, default=None):
+    with session_lock:
+        return user_data.get(user_id, {}).get(key, default)
+
+
+def clear_session(user_id):
+    with session_lock:
+        user_states.pop(user_id, None)
+        user_data.pop(user_id, None)
+
+
+# ============================================================
+# 5. KEYBOARDS
+# ============================================================
 
 def main_keyboard():
     markup = types.InlineKeyboardMarkup(row_width=2)
-
     markup.add(
         types.InlineKeyboardButton(
-            "🛍 Our Services",
-            callback_data="services"
+            "🛍 Our Services", callback_data="services"
         ),
         types.InlineKeyboardButton(
-            "📦 Book an Order",
-            callback_data="book"
+            "📦 Book an Order", callback_data="new_order"
         )
     )
-
     markup.add(
         types.InlineKeyboardButton(
-            "❓ FAQs",
-            callback_data="faqs"
+            "❓ FAQs", callback_data="faqs"
         ),
         types.InlineKeyboardButton(
-            "💬 Customer Support",
-            callback_data="support"
+            "💬 Customer Support", callback_data="support"
         )
     )
-
     return markup
 
 
 def admin_keyboard():
     markup = types.InlineKeyboardMarkup(row_width=2)
-
     markup.add(
         types.InlineKeyboardButton(
-            "📊 Statistics",
-            callback_data="admin:stats"
+            "📊 Statistics", callback_data="admin_stats"
         ),
         types.InlineKeyboardButton(
-            "📢 Broadcast",
-            callback_data="admin:broadcast"
+            "📦 Recent Orders", callback_data="admin_orders"
         )
     )
-
     markup.add(
         types.InlineKeyboardButton(
-            "🛠 Maintenance",
-            callback_data="admin:maintenance"
+            "📢 Broadcast", callback_data="admin_broadcast"
         ),
         types.InlineKeyboardButton(
-            "📦 Recent Orders",
-            callback_data="admin:orders"
+            "🔧 Maintenance", callback_data="admin_maintenance"
         )
     )
-
     markup.add(
         types.InlineKeyboardButton(
-            "🔄 Refresh Panel",
-            callback_data="admin:home"
+            "🔄 Refresh Panel", callback_data="admin_home"
         )
     )
-
     return markup
 
 
-# ==========================================
-# ADMIN CHECK
-# ==========================================
+def back_keyboard():
+    markup = types.InlineKeyboardMarkup()
+    markup.add(
+        types.InlineKeyboardButton(
+            "⬅️ Main Menu", callback_data="home"
+        )
+    )
+    return markup
+
+
+def order_confirmation_keyboard():
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton(
+            "✅ Confirm Order", callback_data="confirm_order"
+        ),
+        types.InlineKeyboardButton(
+            "❌ Cancel", callback_data="cancel_order"
+        )
+    )
+    return markup
+
+
+# ============================================================
+# 6. HELPERS AND ACCESS CONTROL
+# ============================================================
 
 def is_admin(user_id):
     return user_id == ADMIN_ID
 
 
-def show_admin_panel(chat_id):
-    status = (
-        "🔴 ON"
-        if get_maintenance()
-        else "🟢 OFF"
+def maintenance_enabled():
+    return get_setting("maintenance", "0") == "1"
+
+
+def maintenance_message():
+    return (
+        "🔧 <b>Temporary Maintenance</b>\n\n"
+        "Our service is currently under maintenance. "
+        "Please try again later. Thank you for your patience."
     )
+
+
+def send_main_menu(chat_id):
+    bot.send_message(
+        chat_id,
+        f"🏠 <b>{html.escape(BOT_NAME)}</b>\n\n"
+        "Please choose an option:",
+        reply_markup=main_keyboard(),
+        parse_mode="HTML"
+    )
+
+
+def send_admin_panel(chat_id):
+    users, orders, pending = get_statistics()
+    maintenance = "ON 🔴" if maintenance_enabled() else "OFF 🟢"
 
     text = (
-        "👑 <b>ADMIN CONTROL PANEL</b>\n\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "⚙️ System Status: Active\n"
-        f"🛠 Maintenance: {status}\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        "Select an option below:"
+        "👑 <b>PREMIUM ADMIN PANEL</b>\n\n"
+        f"👥 Users: <b>{users}</b>\n"
+        f"📦 Orders: <b>{orders}</b>\n"
+        f"⏳ Pending: <b>{pending}</b>\n"
+        f"🔧 Maintenance: <b>{maintenance}</b>\n\n"
+        "Select an administrative action:"
     )
-
     bot.send_message(
         chat_id,
         text,
-        reply_markup=admin_keyboard()
+        reply_markup=admin_keyboard(),
+        parse_mode="HTML"
     )
 
 
-# ==========================================
-# START COMMAND
-# ==========================================
+# ============================================================
+# 7. USER-FACING PAGES
+# ============================================================
 
-@bot.message_handler(commands=["start"])
-def start_command(message):
-    register_user(message.from_user)
+def show_services(chat_id):
+    lines = ["🛍 <b>OUR PROFESSIONAL SERVICES</b>\n"]
+    for number, (name, description) in enumerate(SERVICES, start=1):
+        lines.append(
+            f"<b>{number}. {html.escape(name)}</b>\n"
+            f"{html.escape(description)}\n"
+        )
 
-    if get_maintenance() and not is_admin(message.from_user.id):
-        bot.reply_to(
-            message,
-            "🛠 <b>We are currently under maintenance.</b>\n\n"
+    bot.send_message(
+        chat_id,
+        "\n".join(lines),
+        reply_markup=back_keyboard(),
+        parse_mode="HTML"
+    )
+
+
+def show_faq(chat_id):
+    text = (
+        "❓ <b>FREQUENTLY ASKED QUESTIONS</b>\n\n"
+        "<b>Q1. How can I place an order?</b>\n"
+        "Choose Book an Order from the main menu.\n\n"
+        "<b>Q2. How will I know my order was received?</b>\n"
+        "The bot will send you an order ID after confirmation.\n\n"
+        "<b>Q3. How can I contact support?</b>\n"
+        "Use the Customer Support option.\n\n"
+        "<b>Q4. How long does an order take?</b>\n"
+        "Delivery time depends on the selected service.\n\n"
+        "<b>Q5. Can I request a custom service?</b>\n"
+        "Yes. Describe your requirements in the order details."
+    )
+    bot.send_message(
+        chat_id,
+        text,
+        reply_markup=back_keyboard(),
+        parse_mode="HTML"
+    )
+
+
+def show_support(chat_id):
+    username = SUPPORT_USERNAME.strip().lstrip("@")
+    if username:
+        contact = f"\n\nSupport: @{html.escape(username)}"
+    else:
+        contact = (
+            "\n\nSupport contact has not been configured yet. "
             "Please try again later."
+        )
+
+    bot.send_message(
+        chat_id,
+        "💬 <b>CUSTOMER SUPPORT</b>\n\n"
+        "Need assistance? We are here to help."
+        + contact,
+        reply_markup=back_keyboard(),
+        parse_mode="HTML"
+    )
+
+
+# ============================================================
+# 8. ORDER BOOKING FLOW
+# ============================================================
+
+def begin_order(user_id):
+    if maintenance_enabled() and not is_admin(user_id):
+        bot.send_message(
+            user_id, maintenance_message(), parse_mode="HTML"
         )
         return
 
-    text = (
-        "✨ <b>WELCOME TO OUR BUSINESS BOT</b>\n\n"
-        "Your trusted business automation platform.\n\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "🛍 Explore our services\n"
-        "📦 Place your order\n"
-        "❓ Get answers to your questions\n"
-        "💬 Contact customer support\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        "Please select an option:"
+    clear_session(user_id)
+    set_state(user_id, "order_service")
+
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for index, (name, _description) in enumerate(SERVICES):
+        markup.add(
+            types.InlineKeyboardButton(
+                name,
+                callback_data=f"select_service:{index}"
+            )
+        )
+
+    markup.add(
+        types.InlineKeyboardButton(
+            "❌ Cancel", callback_data="home"
+        )
     )
 
     bot.send_message(
-        message.chat.id,
-        text,
-        reply_markup=main_keyboard()
+        user_id,
+        "📦 <b>NEW ORDER</b>\n\n"
+        "Please select the service you need:",
+        reply_markup=markup,
+        parse_mode="HTML"
     )
 
 
-# ==========================================
-# ADMIN COMMAND
-# ==========================================
+# ============================================================
+# 9. COMMAND HANDLERS
+# ============================================================
 
-@bot.message_handler(commands=["admin"])
-def admin_command(message):
-    if not is_admin(message.from_user.id):
-        bot.reply_to(message, "⛔ Access denied.")
+@bot.message_handler(commands=["start"])
+def start_command(message):
+    user_id = message.from_user.id
+    clear_session(user_id)
+    save_user(message.from_user)
+
+    if maintenance_enabled() and not is_admin(user_id):
+        bot.send_message(
+            user_id, maintenance_message(), parse_mode="HTML"
+        )
         return
 
-    show_admin_panel(message.chat.id)
+    first_name = html.escape(
+        message.from_user.first_name or "Customer"
+    )
+    bot.send_message(
+        user_id,
+        f"👋 <b>Welcome, {first_name}!</b>\n\n"
+        f"Welcome to <b>{html.escape(BOT_NAME)}</b>.\n"
+        "Choose an option below to get started:",
+        reply_markup=main_keyboard(),
+        parse_mode="HTML"
+    )
 
 
 @bot.message_handler(commands=["cancel"])
 def cancel_command(message):
-    with state_lock:
-        user_states.pop(message.from_user.id, None)
-
-    bot.reply_to(
-        message,
+    clear_session(message.from_user.id)
+    bot.send_message(
+        message.chat.id,
         "❌ Operation cancelled.",
         reply_markup=main_keyboard()
     )
 
 
-# ==========================================
-# CALLBACK HANDLER
-# ==========================================
+@bot.message_handler(commands=["admin"])
+def admin_command(message):
+    user_id = message.from_user.id
+    if not is_admin(user_id):
+        bot.reply_to(message, "⛔ Access denied.")
+        return
+
+    clear_session(user_id)
+    send_admin_panel(message.chat.id)
+
+
+# ============================================================
+# 10. CALLBACK HANDLER
+# ============================================================
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
     user_id = call.from_user.id
-    register_user(call.from_user)
+    data = call.data or ""
 
-    data = call.data
+    try:
+        bot.answer_callback_query(call.id)
 
-    if get_maintenance() and not is_admin(user_id):
-        bot.answer_callback_query(
-            call.id,
-            "System is under maintenance.",
-            show_alert=True
-        )
-        return
-
-    bot.answer_callback_query(call.id)
-
-    # ADMIN CONTROLS
-    if data.startswith("admin:"):
-
-        if not is_admin(user_id):
-            bot.send_message(call.message.chat.id, "⛔ Unauthorized.")
+        if data == "home":
+            clear_session(user_id)
+            if maintenance_enabled() and not is_admin(user_id):
+                bot.send_message(
+                    user_id, maintenance_message(), parse_mode="HTML"
+                )
+                return
+            send_main_menu(user_id)
             return
 
-        action = data.split(":", 1)[1]
-
-        if action == "home":
-            show_admin_panel(call.message.chat.id)
-
-        elif action == "stats":
-            with db_lock:
-                conn = get_db()
-
-                users = conn.execute(
-                    "SELECT COUNT(*) FROM users"
-                ).fetchone()[0]
-
-                orders = conn.execute(
-                    "SELECT COUNT(*) FROM orders"
-                ).fetchone()[0]
-
-                pending = conn.execute(
-                    "SELECT COUNT(*) FROM orders WHERE status = 'Pending'"
-                ).fetchone()[0]
-
-                conn.close()
-
-            text = (
-                "📊 <b>LIVE BUSINESS STATISTICS</b>\n\n"
-                f"👥 Total Users: <b>{users}</b>\n"
-                f"📦 Total Orders: <b>{orders}</b>\n"
-                f"⏳ Pending Orders: <b>{pending}</b>\n"
-            )
-
-            bot.send_message(
-                call.message.chat.id,
-                text,
-                reply_markup=admin_keyboard()
-            )
-
-        elif action == "broadcast":
-            with state_lock:
-                user_states[user_id] = {
-                    "step": "broadcast"
-                }
-
-            bot.send_message(
-                call.message.chat.id,
-                "📢 <b>BROADCAST SYSTEM</b>\n\n"
-                "Send the message you want to deliver "
-                "to all registered users.\n\n"
-                "Use /cancel to cancel."
-            )
-
-        elif action == "maintenance":
-            new_status = not get_maintenance()
-            set_maintenance(new_status)
-
-            status = "ENABLED 🔴" if new_status else "DISABLED 🟢"
-
-            bot.send_message(
-                call.message.chat.id,
-                f"🛠 Maintenance mode is now <b>{status}</b>."
-            )
-
-            show_admin_panel(call.message.chat.id)
-
-        elif action == "orders":
-            with db_lock:
-                conn = get_db()
-
-                rows = conn.execute("""
-                    SELECT id, user_id, service,
-                           details, status, created_at
-                    FROM orders
-                    ORDER BY id DESC
-                    LIMIT 10
-                """).fetchall()
-
-                conn.close()
-
-            if not rows:
+        if data == "services":
+            if maintenance_enabled() and not is_admin(user_id):
                 bot.send_message(
-                    call.message.chat.id,
-                    "📦 No orders have been received yet."
+                    user_id, maintenance_message(), parse_mode="HTML"
+                )
+                return
+            show_services(user_id)
+            return
+
+        if data == "faqs":
+            if maintenance_enabled() and not is_admin(user_id):
+                bot.send_message(
+                    user_id, maintenance_message(), parse_mode="HTML"
+                )
+                return
+            show_faq(user_id)
+            return
+
+        if data == "support":
+            show_support(user_id)
+            return
+
+        if data == "new_order":
+            begin_order(user_id)
+            return
+
+        if data.startswith("select_service:"):
+            if maintenance_enabled() and not is_admin(user_id):
+                clear_session(user_id)
+                bot.send_message(
+                    user_id, maintenance_message(), parse_mode="HTML"
                 )
                 return
 
-            text = "📦 <b>RECENT ORDERS</b>\n\n"
-
-            for order in rows:
-                text += (
-                    f"🆔 Order: <b>#{order['id']}</b>\n"
-                    f"👤 User: <code>{order['user_id']}</code>\n"
-                    f"🛍 Service: {html.escape(order['service'])}\n"
-                    f"📝 Details: {html.escape(order['details'] or '')}\n"
-                    f"📌 Status: {html.escape(order['status'])}\n"
-                    f"🕒 {html.escape(order['created_at'])}\n"
-                    "━━━━━━━━━━━━━━━━━━\n"
+            if get_state(user_id) != "order_service":
+                bot.send_message(
+                    user_id,
+                    "Your booking session expired. Please use /start."
                 )
-
-            bot.send_message(
-                call.message.chat.id,
-                text,
-                reply_markup=admin_keyboard()
-            )
-
-        return
-
-    # USER MENU
-
-    if data == "home":
-        bot.send_message(
-            call.message.chat.id,
-            "🏠 <b>Main Menu</b>",
-            reply_markup=main_keyboard()
-        )
-
-    elif data == "services":
-        markup = types.InlineKeyboardMarkup()
-
-        markup.add(
-            types.InlineKeyboardButton(
-                "🤖 AI Automation",
-                callback_data="service:AI Automation"
-            )
-        )
-
-        markup.add(
-            types.InlineKeyboardButton(
-                "🎨 Digital Services",
-                callback_data="service:Digital Services"
-            )
-        )
-
-        markup.add(
-            types.InlineKeyboardButton(
-                "💻 Custom Solutions",
-                callback_data="service:Custom Solutions"
-            )
-        )
-
-        markup.add(
-            types.InlineKeyboardButton(
-                "🔙 Back",
-                callback_data="home"
-            )
-        )
-
-        bot.send_message(
-            call.message.chat.id,
-            "🛍 <b>OUR SERVICES</b>\n\n"
-            "Explore our available business services:",
-            reply_markup=markup
-        )
-
-    elif data.startswith("service:"):
-        service = data.split(":", 1)[1]
-
-        markup = types.InlineKeyboardMarkup()
-
-        markup.add(
-            types.InlineKeyboardButton(
-                "📦 Order This Service",
-                callback_data="order:" + service
-            )
-        )
-
-        bot.send_message(
-            call.message.chat.id,
-            f"✨ <b>{html.escape(service)}</b>\n\n"
-            "Professional solutions tailored to your needs.\n\n"
-            "Click below to book this service.",
-            reply_markup=markup
-        )
-
-    elif data == "book":
-        markup = types.InlineKeyboardMarkup(row_width=1)
-
-        for service in [
-            "AI Automation",
-            "Digital Services",
-            "Custom Solutions"
-        ]:
-            markup.add(
-                types.InlineKeyboardButton(
-                    "📦 " + service,
-                    callback_data="order:" + service
-                )
-            )
-
-        bot.send_message(
-            call.message.chat.id,
-            "📦 <b>SELECT A SERVICE TO ORDER</b>",
-            reply_markup=markup
-        )
-
-    elif data.startswith("order:"):
-        service = data.split(":", 1)[1]
-
-        with state_lock:
-            user_states[user_id] = {
-                "step": "order",
-                "service": service
-            }
-
-        bot.send_message(
-            call.message.chat.id,
-            f"📦 <b>New Order: {html.escape(service)}</b>\n\n"
-            "Please send your order requirements and "
-            "any important details in one message.\n\n"
-            "Use /cancel to cancel."
-        )
-
-    elif data == "faqs":
-        bot.send_message(
-            call.message.chat.id,
-            "❓ <b>FREQUENTLY ASKED QUESTIONS</b>\n\n"
-            "1️⃣ How can I place an order?\n"
-            "Select Book an Order and choose a service.\n\n"
-            "2️⃣ How can I contact support?\n"
-            "Use the Customer Support button.\n\n"
-            "3️⃣ How do I know my order was received?\n"
-            "The bot will send you an order confirmation.\n\n"
-            "4️⃣ How can I check pricing?\n"
-            "Contact our support team for a quotation.",
-            reply_markup=main_keyboard()
-        )
-
-    elif data == "support":
-        with state_lock:
-            user_states[user_id] = {
-                "step": "support"
-            }
-
-        bot.send_message(
-            call.message.chat.id,
-            "💬 <b>CUSTOMER SUPPORT</b>\n\n"
-            "Please send your question or message.\n"
-            "Our administrator will receive it.\n\n"
-            "Use /cancel to cancel."
-        )
-
-
-# ==========================================
-# MESSAGE HANDLER
-# ==========================================
-
-@bot.message_handler(content_types=[
-    "text", "photo", "document",
-    "video", "voice", "audio"
-])
-def message_handler(message):
-    user = message.from_user
-    user_id = user.id
-
-    register_user(user)
-
-    if message.text and message.text.startswith("/"):
-        return
-
-    if get_maintenance() and not is_admin(user_id):
-        bot.reply_to(
-            message,
-            "🛠 We are currently under maintenance."
-        )
-        return
-
-    with state_lock:
-        state = user_states.get(user_id)
-
-    if not state:
-        if message.content_type == "text":
-            bot.reply_to(
-                message,
-                "Please select an option from the main menu.",
-                reply_markup=main_keyboard()
-            )
-        return
-
-    step = state.get("step")
-
-    # ORDER PROCESSING
-    if step == "order":
-
-        if message.content_type != "text":
-            bot.reply_to(
-                message,
-                "Please send your order details as text."
-            )
-            return
-
-        details = message.text.strip()
-
-        if len(details) < 3:
-            bot.reply_to(message, "Please provide more details.")
-            return
-
-        service = state["service"]
-
-        order_id = save_order(
-            user_id,
-            service,
-            details
-        )
-
-        with state_lock:
-            user_states.pop(user_id, None)
-
-        bot.reply_to(
-            message,
-            "✅ <b>ORDER RECEIVED SUCCESSFULLY!</b>\n\n"
-            f"🆔 Order ID: <b>#{order_id}</b>\n"
-            f"🛍 Service: {html.escape(service)}\n"
-            "📌 Status: Pending\n\n"
-            "Thank you for choosing our business!"
-        )
-
-        admin_text = (
-            "🔔 <b>NEW ORDER RECEIVED</b>\n\n"
-            f"🆔 Order: #{order_id}\n"
-            f"👤 User: <code>{user_id}</code>\n"
-            f"📛 Name: {html.escape(user.first_name or '')}\n"
-            f"🛍 Service: {html.escape(service)}\n"
-            f"📝 Details: {html.escape(details)}"
-        )
-
-        try:
-            bot.send_message(ADMIN_ID, admin_text)
-        except Exception:
-            logger.exception("Could not notify admin about order.")
-
-    # CUSTOMER SUPPORT
-    elif step == "support":
-
-        with state_lock:
-            user_states.pop(user_id, None)
-
-        support_caption = (
-            "💬 <b>NEW CUSTOMER SUPPORT MESSAGE</b>\n\n"
-            f"👤 Name: {html.escape(user.first_name or '')}\n"
-            f"🆔 User ID: <code>{user_id}</code>\n"
-            f"Username: @{html.escape(user.username or 'N/A')}"
-        )
-
-        try:
-            bot.send_message(ADMIN_ID, support_caption)
-
-            bot.copy_message(
-                ADMIN_ID,
-                message.chat.id,
-                message.message_id
-            )
-
-            bot.reply_to(
-                message,
-                "✅ Your message has been delivered to our support team."
-            )
-
-        except Exception:
-            logger.exception("Support message delivery failed.")
-
-            bot.reply_to(
-                message,
-                "⚠️ Message delivery failed. Please try again later."
-            )
-
-    # ADMIN BROADCAST
-    elif step == "broadcast" and is_admin(user_id):
-
-        with state_lock:
-            user_states.pop(user_id, None)
-
-        with db_lock:
-            conn = get_db()
-
-            users = conn.execute(
-                "SELECT user_id FROM users"
-            ).fetchall()
-
-            conn.close()
-
-        bot.reply_to(
-            message,
-            f"📢 Starting broadcast to {len(users)} users..."
-        )
-
-        sent = 0
-        failed = 0
-
-        for row in users:
-            target_id = row["user_id"]
+                return
 
             try:
-                bot.copy_message(
-                    target_id,
-                    message.chat.id,
-                    message.message_id
+                index = int(data.split(":", 1)[1])
+                service = SERVICES[index][0]
+            except (ValueError, IndexError):
+                bot.send_message(
+                    user_id,
+                    "Invalid service selection. Please try again."
                 )
-                sent += 1
+                return
 
-            except Exception:
-                failed += 1
-                logger.warning(
-                    "Broadcast failed for user %s",
-                    target_id
+            set_data(user_id, "service", service)
+            set_state(user_id, "order_name")
+            bot.send_message(
+                user_id,
+                "👤 <b>Please enter your full name:</b>",
+                parse_mode="HTML"
+            )
+            return
+
+        if data.startswith("admin_"):
+            if not is_admin(user_id):
+                bot.answer_callback_query(
+                    call.id, "Access denied.", show_alert=True
                 )
+                return
 
-        bot.send_message(
-            message.chat.id,
-            "📊 <b>BROADCAST COMPLETED</b>\n\n"
-            f"✅ Successfully sent: {sent}\n"
-            f"❌ Failed: {failed}\n"
-            f"👥 Total targets: {len(users)}",
-            reply_markup=admin_keyboard()
-        )
+            if data == "admin_home":
+                send_admin_panel(user_id)
+                return
 
+            if data == "admin_stats":
+                users, orders, pending = get_statistics()
+                status = "ON 🔴" if maintenance_enabled() else "OFF 🟢"
+                text = (
+                    "📊 <b>BUSINESS STATISTICS</b>\n\n"
+                    f"👥 Total users: <b>{users}</b>\n"
+                    f"📦 Total orders: <b>{orders}</b>\n"
+                    f"⏳ Pending orders: <b>{pending}</b>\n"
+                    f"🔧 Maintenance: <b>{status}</b>"
+                )
+                bot.send_message(
+                    user_id, text,
+                    reply_markup=admin_keyboard(),
+                    parse_mode="HTML"
+                )
+                return
 
-# ==========================================
-# START BOT
-# ==========================================
+            if data == "admin_orders":
+                orders = get_recent_orders(10)
+                if not orders:
+                    bot.send_message(
+                        user_id,
+                        "📦 No orders have been placed yet.",
+                        reply_markup=admin_keyboard()
+                    )
+                    return
 
-if __name__ == "__main__":
-
-    init_database()
-
-    logger.info("Business Automation Bot is starting...")
-
-    try:
-        bot.infinity_polling(
-            timeout=30,
-            long_polling_timeout=30,
-            skip)
+                chunks = ["📦 <b>RECENT ORDERS</b>\n"]
+                current = ""
+                for order in orders:
+                    item = (
+                        f"\n🆔 <b>Order #{order['id']}</b>\n"
+                        f"👤 {html.escape(order['customer_name'])}\n"
+                        f"🛍 {html.escape(order['service'])}\n"
+                        f"📌 {html.escape(order['status'])}\n"
+                        f"🗓 {html.escape(order['created_at'])}\n"
+                        f"🆔 User: <code>{order['user_id']}</code>\n"
+                        "━━━━━━━━━━━━━━\n"
+                    )
+                    if len(current) + len(item) > 3500:
+                        chunks.append(current)
+                        current = ""
+                    current += 
