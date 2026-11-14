@@ -1,4 +1,3 @@
-
 import sqlite3
 from datetime import datetime
 from telebot import types
@@ -14,8 +13,13 @@ BOT_TYPES = {
 }
 
 
+# ==========================================
+# DATABASE INITIALIZATION
+# ==========================================
+
 def init_factory():
     conn = sqlite3.connect(DB_NAME)
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS factory_projects (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -25,12 +29,18 @@ def init_factory():
             created_at TEXT NOT NULL
         )
     """)
+
     conn.commit()
     conn.close()
 
 
+# ==========================================
+# PROJECT CREATION
+# ==========================================
+
 def create_project(name, bot_type):
     conn = sqlite3.connect(DB_NAME)
+
     cur = conn.cursor()
 
     cur.execute("""
@@ -45,10 +55,16 @@ def create_project(name, bot_type):
     ))
 
     project_id = cur.lastrowid
+
     conn.commit()
     conn.close()
+
     return project_id
 
+
+# ==========================================
+# GET ALL PROJECTS
+# ==========================================
 
 def get_projects():
     conn = sqlite3.connect(DB_NAME)
@@ -60,25 +76,38 @@ def get_projects():
     """).fetchall()
 
     conn.close()
+
     return [dict(row) for row in rows]
 
+
+# ==========================================
+# BOT FACTORY HANDLERS
+# ==========================================
 
 def register_factory_handlers(bot):
 
     init_factory()
 
+    import os
+
     def is_admin(user_id):
-        import os
         admins = os.getenv("FACTORY_ADMIN_IDS", "")
+
         allowed = [
             int(x.strip())
             for x in admins.split(",")
             if x.strip().isdigit()
         ]
+
         return user_id in allowed
+
+    # ======================================
+    # MAIN FACTORY MENU
+    # ======================================
 
     @bot.message_handler(commands=["factory"])
     def factory_menu(message):
+
         if not is_admin(message.from_user.id):
             bot.reply_to(message, "Access denied.")
             return
@@ -103,16 +132,23 @@ def register_factory_handlers(bot):
             reply_markup=markup
         )
 
+    # ======================================
+    # CREATE NEW BOT MENU
+    # ======================================
+
     @bot.callback_query_handler(
         func=lambda call: call.data == "factory_create"
     )
     def factory_create(call):
+
         if not is_admin(call.from_user.id):
+            bot.answer_callback_query(call.id)
             return
 
         markup = types.InlineKeyboardMarkup(row_width=2)
 
         for key, label in BOT_TYPES.items():
+
             markup.add(
                 types.InlineKeyboardButton(
                     label,
@@ -121,64 +157,96 @@ def register_factory_handlers(bot):
             )
 
         bot.answer_callback_query(call.id)
+
         bot.send_message(
             call.message.chat.id,
             "Select the type of bot you want to create:",
             reply_markup=markup
         )
 
+    # ======================================
+    # SELECT BOT TYPE
+    # ======================================
+
     @bot.callback_query_handler(
         func=lambda call: call.data.startswith("factory_type_")
     )
     def factory_select_type(call):
+
         if not is_admin(call.from_user.id):
+            bot.answer_callback_query(call.id)
             return
 
         bot.answer_callback_query(call.id)
 
-        bot.send_message(
+        bot_type = call.data.replace(
+            "factory_type_", ""
+        )
+
+        if bot_type not in BOT_TYPES:
+            return
+
+        prompt = bot.send_message(
             call.message.chat.id,
             "Send the name of your new bot project:"
         )
 
         bot.register_next_step_handler(
-            bot.send_message(
-                call.message.chat.id,
-                "Example: Premium Business Assistant"
-            ),
+            prompt,
             save_project_name,
-            call.data.replace("factory_type_", "")
+            bot_type
         )
 
+    # ======================================
+    # SAVE PROJECT NAME
+    # ======================================
+
     def save_project_name(message, bot_type):
+
         if not is_admin(message.from_user.id):
             return
 
-        name = message.text.strip() if message.text else ""
+        if not message.text:
+            bot.reply_to(
+                message,
+                "Please send a text project name."
+            )
+            return
+
+        name = message.text.strip()
 
         if not name or len(name) > 80:
             bot.reply_to(
                 message,
-                "Please send a valid project name (1-80 characters)."
+                "Project name must be 1-80 characters."
             )
             return
 
-        project_id = create_project(name, bot_type)
+        project_id = create_project(
+            name,
+            bot_type
+        )
 
         bot.reply_to(
             message,
-            f"✅ PROJECT CREATED!\n\n"
+            "✅ PROJECT CREATED!\n\n"
             f"Project ID: #{project_id}\n"
             f"Name: {name}\n"
             f"Type: {BOT_TYPES[bot_type]}\n"
-            f"Status: Planning"
+            "Status: Planning"
         )
+
+    # ======================================
+    # VIEW PROJECTS
+    # ======================================
 
     @bot.callback_query_handler(
         func=lambda call: call.data == "factory_projects"
     )
     def factory_projects(call):
+
         if not is_admin(call.from_user.id):
+            bot.answer_callback_query(call.id)
             return
 
         bot.answer_callback_query(call.id)
@@ -188,18 +256,22 @@ def register_factory_handlers(bot):
         if not projects:
             bot.send_message(
                 call.message.chat.id,
-                "No projects created yet."
+                "📁 No projects created yet."
             )
             return
 
         output = "📁 YOUR FACTORY PROJECTS\n\n"
 
-        for p in projects[:20]:
+        for project in projects[:20]:
+
             output += (
-                f"#{p['id']} - {p['name']}\n"
-                f"Type: {p['bot_type']}\n"
-                f"Status: {p['status']}\n\n"
+                f"#{project['id']} - {project['name']}\n"
+                f"Type: {project['bot_type']}\n"
+                f"Status: {project['status']}\n\n"
             )
 
-        bot.send_message(call.message.chat.id, output)
-  
+        bot.send_message(
+            call.message.chat.id,
+            output
+    )
+        
